@@ -11,10 +11,22 @@ Models:
   MIMOFIRModel   — Finite Impulse Response (feed-forward only, na=0)
   MIMOARMAXModel — ARMAX via iterative pseudo-linear regression (PLR)
   MIMOOEModel    — Output Error (simulation-consistent training)
+
+Overflow safety
+---------------
+Both ARMAX and OE use iterative fitting where the simulated trajectory can
+diverge in early iterations.  Three defences are applied:
+  1. Phi sanity check before every solve — skip the step if Phi is not finite.
+  2. Y_oe clipping to ±Y_CLIP after each OE simulation step.
+  3. _predict_from_buffer clamps its output so NaN/Inf cannot propagate into
+     the TrajectoryGenerator's rolling buffer.
 """
 
 import numpy as np
 from arx_model import MIMOARXModel
+
+# Physical velocity bound used for clipping (m/s or rad/s, both ≤ this)
+_Y_CLIP = 5.0
 
 
 # ── FIR Model ─────────────────────────────────────────────────────────────────
@@ -36,17 +48,18 @@ class MIMOFIRModel(MIMOARXModel):
 
     def _predict_from_buffer(self, Y_buf: np.ndarray, U_buf: np.ndarray) -> np.ndarray:
         """FIR prediction: only past inputs matter, no AR terms."""
-        # Channel 0 (v): [u_v(k-1..nb_diag), u_ω(k-1..nb_cross)]
         phi_0 = np.concatenate([
             U_buf[-self.nb_diag:, 0][::-1],
             U_buf[-self.nb_cross:, 1][::-1],
         ])
-        # Channel 1 (ω): [u_v(k-1..nb_cross), u_ω(k-1..nb_diag)]
         phi_1 = np.concatenate([
             U_buf[-self.nb_cross:, 0][::-1],
             U_buf[-self.nb_diag:, 1][::-1],
         ])
-        return np.array([phi_0 @ self.theta_0_, phi_1 @ self.theta_1_])
+        return np.clip(
+            np.nan_to_num(np.array([phi_0 @ self.theta_0_, phi_1 @ self.theta_1_])),
+            -_Y_CLIP, _Y_CLIP,
+        )
 
 
 # ── ARMAX Model ───────────────────────────────────────────────────────────────
@@ -78,12 +91,9 @@ class MIMOARMAXModel(MIMOARXModel):
         self.n_iter = n_iter
         self.max_lag = max(na_diag, nb_diag, nc)
 
-    # theta_0_ / theta_1_ will be longer than ARX (appended nc MA coeffs per channel)
-
     def _build_armax_regressors(self, Y: np.ndarray, U: np.ndarray, Eps: np.ndarray):
         """
         Build augmented regressor: [phi_arx | phi_ma].
-
         phi_ma contains nc past residuals for each output channel independently.
         """
         N = len(Y)
@@ -120,36 +130,50 @@ class MIMOARMAXModel(MIMOARXModel):
 
         return Phi_0, Phi_1, Y[self.max_lag:]
 
+    @staticmethod
+    def _ridge_solve(Phi, y, alpha):
+        """Ridge LS.  Returns None if Phi contains non-finite values."""
+        if not np.all(np.isfinite(Phi)):
+            return None
+        A = Phi.T @ Phi + alpha * np.eye(Phi.shape[1])
+        return np.linalg.solve(A, Phi.T @ y)
+
     def fit(self, Y: np.ndarray, U: np.ndarray) -> 'MIMOARMAXModel':
         """Iterative PLR: alternates between LS fit and residual update."""
         Eps = np.zeros_like(Y)
-
-        def ridge_lstsq(Phi, y):
-            A = Phi.T @ Phi + self.ridge_alpha * np.eye(Phi.shape[1])
-            return np.linalg.solve(A, Phi.T @ y)
-
         for _ in range(self.n_iter):
             P0, P1, Y_t = self._build_armax_regressors(Y, U, Eps)
-            self.theta_0_ = ridge_lstsq(P0, Y_t[:, 0])
-            self.theta_1_ = ridge_lstsq(P1, Y_t[:, 1])
-            # Update residual estimate
-            Eps[self.max_lag:, 0] = Y_t[:, 0] - P0 @ self.theta_0_
-            Eps[self.max_lag:, 1] = Y_t[:, 1] - P1 @ self.theta_1_
+            t0 = self._ridge_solve(P0, Y_t[:, 0], self.ridge_alpha)
+            t1 = self._ridge_solve(P1, Y_t[:, 1], self.ridge_alpha)
+            if t0 is None or t1 is None:
+                break
+            self.theta_0_, self.theta_1_ = t0, t1
+            # Residual update — clip so Eps cannot blow up on a bad iteration
+            raw_eps0 = Y_t[:, 0] - P0 @ self.theta_0_
+            raw_eps1 = Y_t[:, 1] - P1 @ self.theta_1_
+            Eps[self.max_lag:, 0] = np.clip(raw_eps0, -_Y_CLIP, _Y_CLIP)
+            Eps[self.max_lag:, 1] = np.clip(raw_eps1, -_Y_CLIP, _Y_CLIP)
+
+        # Fallback: plain ARX if PLR never succeeded
+        if self.theta_0_ is None:
+            P0, P1, Y_t = self._build_armax_regressors(Y, U, np.zeros_like(Y))
+            self.theta_0_ = self._ridge_solve(P0, Y_t[:, 0], self.ridge_alpha) or np.zeros(P0.shape[1])
+            self.theta_1_ = self._ridge_solve(P1, Y_t[:, 1], self.ridge_alpha) or np.zeros(P1.shape[1])
 
         self._is_fitted = True
         return self
 
     def _predict_from_buffer(self, Y_buf: np.ndarray, U_buf: np.ndarray) -> np.ndarray:
         """
-        Simulation-mode prediction.  MA terms (residuals) are set to zero
-        because no noise realisation is available during free-run.
+        Simulation-mode prediction.  MA terms (residuals) are zero in free-run.
+        Output is clamped to prevent NaN/Inf from entering the rolling buffer.
         """
         phi_0 = np.concatenate([
             Y_buf[-self.na_diag:, 0][::-1]  if self.na_diag  else np.empty(0),
             Y_buf[-self.na_cross:, 1][::-1] if self.na_cross else np.empty(0),
             U_buf[-self.nb_diag:, 0][::-1],
             U_buf[-self.nb_cross:, 1][::-1] if self.nb_cross else np.empty(0),
-            np.zeros(self.nc),  # MA terms = 0 in simulation
+            np.zeros(self.nc),
         ])
         phi_1 = np.concatenate([
             Y_buf[-self.na_cross:, 0][::-1] if self.na_cross else np.empty(0),
@@ -158,31 +182,24 @@ class MIMOARMAXModel(MIMOARXModel):
             U_buf[-self.nb_diag:, 1][::-1],
             np.zeros(self.nc),
         ])
-        return np.array([phi_0 @ self.theta_0_, phi_1 @ self.theta_1_])
+        raw = np.array([phi_0 @ self.theta_0_, phi_1 @ self.theta_1_])
+        return np.clip(np.nan_to_num(raw), -_Y_CLIP, _Y_CLIP)
 
     def predict(self, Y: np.ndarray, U: np.ndarray, mode: str = 'one_step') -> np.ndarray:
-        """
-        One-step mode uses the augmented (ARMAX) regressor with true residuals.
-        Simulation mode uses the base ARX part (MA terms = 0).
-        """
         assert self._is_fitted
         N = len(Y)
         Y_hat = np.full((N, 2), np.nan)
 
         if mode == 'one_step':
             Eps = np.zeros_like(Y)
-            P0, P1, _ = self._build_armax_regressors(Y, U, Eps)
-            Y_hat_raw_0 = P0 @ self.theta_0_
-            Y_hat_raw_1 = P1 @ self.theta_1_
-            # Iteratively refine residuals for one-step predictions
             for _ in range(2):
-                Eps[self.max_lag:, 0] = Y[self.max_lag:, 0] - Y_hat_raw_0
-                Eps[self.max_lag:, 1] = Y[self.max_lag:, 1] - Y_hat_raw_1
                 P0, P1, _ = self._build_armax_regressors(Y, U, Eps)
-                Y_hat_raw_0 = P0 @ self.theta_0_
-                Y_hat_raw_1 = P1 @ self.theta_1_
-            Y_hat[self.max_lag:, 0] = Y_hat_raw_0
-            Y_hat[self.max_lag:, 1] = Y_hat_raw_1
+                yh0 = P0 @ self.theta_0_
+                yh1 = P1 @ self.theta_1_
+                Eps[self.max_lag:, 0] = np.clip(Y[self.max_lag:, 0] - yh0, -_Y_CLIP, _Y_CLIP)
+                Eps[self.max_lag:, 1] = np.clip(Y[self.max_lag:, 1] - yh1, -_Y_CLIP, _Y_CLIP)
+            Y_hat[self.max_lag:, 0] = yh0
+            Y_hat[self.max_lag:, 1] = yh1
 
         elif mode == 'simulation':
             Y_buf = Y[:self.max_lag].copy()
@@ -206,12 +223,8 @@ class MIMOOEModel(MIMOARXModel):
     This aligns training with the simulation (free-run) use case and
     typically reduces accumulated error in long open-loop trajectories.
 
-    Training (iterative):
-      1. Initialise Y_oe = Y (measured)
-      2. Build regressor using Y_oe (model output) + U
-      3. Fit LS against true Y target
-      4. Re-simulate to get new Y_oe
-      5. Repeat n_iter times
+    Overflow defence: after each simulation step Y_oe is clipped to
+    ±_Y_CLIP, and the ridge solve is skipped if Phi is non-finite.
     """
 
     def __init__(
@@ -224,30 +237,53 @@ class MIMOOEModel(MIMOARXModel):
         super().__init__(na_diag, na_cross, nb_diag, nb_cross, ridge_alpha)
         self.n_iter = n_iter
 
+    @staticmethod
+    def _ridge_solve(Phi, y, alpha):
+        if not np.all(np.isfinite(Phi)):
+            return None
+        A = Phi.T @ Phi + alpha * np.eye(Phi.shape[1])
+        return np.linalg.solve(A, Phi.T @ y)
+
     def fit(self, Y: np.ndarray, U: np.ndarray) -> 'MIMOOEModel':
         """
-        Iterative OE fitting: use simulated (model) outputs in the AR regressor
-        while keeping true measured Y as the regression target.
+        Iterative OE: uses simulated outputs in the AR regressor,
+        targets true measured Y.  Falls back to ARX if simulation diverges.
         """
-        def ridge_lstsq(Phi, y):
-            A = Phi.T @ Phi + self.ridge_alpha * np.eye(Phi.shape[1])
-            return np.linalg.solve(A, Phi.T @ y)
-
-        Y_oe = Y.copy()   # starts with measured, becomes model output each iteration
+        clip = max(float(np.abs(Y).max()) * 3.0, _Y_CLIP)
+        Y_oe = Y.copy()
 
         for _ in range(self.n_iter):
-            # Build regressors using simulated Y_oe (not measured Y)
             Phi_0, Phi_1, _ = self._build_regressors(Y_oe, U)
-            # But the regression TARGET is the true measured Y
             Y_target = Y[self.max_lag:]
 
-            self.theta_0_ = ridge_lstsq(Phi_0, Y_target[:, 0])
-            self.theta_1_ = ridge_lstsq(Phi_1, Y_target[:, 1])
+            t0 = self._ridge_solve(Phi_0, Y_target[:, 0], self.ridge_alpha)
+            t1 = self._ridge_solve(Phi_1, Y_target[:, 1], self.ridge_alpha)
+
+            if t0 is None or t1 is None:
+                break   # Phi was non-finite — keep previous theta
+
+            self.theta_0_, self.theta_1_ = t0, t1
             self._is_fitted = True
 
-            # Re-simulate to get updated Y_oe for next iteration
+            # Re-simulate; sanitise and clip before next regressor build
             Y_sim = self.predict(Y, U, mode='simulation')
-            # Warmup region: keep true Y; modelled region: use simulation
-            Y_oe = np.where(np.isnan(Y_sim), Y, Y_sim)
+            finite = np.isfinite(Y_sim)
+            Y_oe = np.where(finite, Y_sim, Y)
+            Y_oe = np.clip(Y_oe, -clip, clip)
+
+        # Absolute fallback: plain ARX on true Y
+        if not self._is_fitted:
+            Phi_0, Phi_1, _ = self._build_regressors(Y, U)
+            Y_t = Y[self.max_lag:]
+            self.theta_0_ = self._ridge_solve(Phi_0, Y_t[:, 0], self.ridge_alpha) \
+                            or np.zeros(Phi_0.shape[1])
+            self.theta_1_ = self._ridge_solve(Phi_1, Y_t[:, 1], self.ridge_alpha) \
+                            or np.zeros(Phi_1.shape[1])
+            self._is_fitted = True
 
         return self
+
+    def _predict_from_buffer(self, Y_buf: np.ndarray, U_buf: np.ndarray) -> np.ndarray:
+        """Clamp output so NaN/Inf cannot propagate into TrajectoryGenerator's buffer."""
+        raw = super()._predict_from_buffer(Y_buf, U_buf)
+        return np.clip(np.nan_to_num(raw), -_Y_CLIP, _Y_CLIP)

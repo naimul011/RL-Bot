@@ -127,12 +127,35 @@ class DataGenerator:
         Generate structured command sequences for trajectory evaluation.
 
         Args:
-            trajectory_type: 'figure8', 'square', 'spiral', 'straight', 'random'
+            trajectory_type: 'figure8', 'square', 'spiral', 'straight', 'random',
+                             'slalom', 'zigzag', 'step_burst'
             n_samples:       number of timesteps
             dt:              timestep (defaults to robot's dt)
 
         Returns:
             (v_cmds, omega_cmds): each shape (n_samples,)
+
+        Lazy-phase trajectories
+        -----------------------
+        'slalom'    — constant speed, square-wave omega at 0.5 s period.
+                      Each half-period is shorter than the motor settling time
+                      (~0.3 s), so the wheels never reach their commanded turn
+                      rate before the direction reverses.  This rounds every
+                      corner: kinematic ideal shows perfect sinusoids, ground
+                      truth shows lag-smoothed arcs, and ARX/ARMAX/OE models
+                      are compared against both.
+
+        'zigzag'    — alternating forward straight segments with rapid 180 °
+                      direction changes.  The turn command lasts only 20 steps
+                      (0.2 s) — less than one motor time constant.  The robot
+                      cannot pivot as fast as commanded, producing a visible
+                      "lazy corner" that each model must learn to reproduce.
+
+        'step_burst'— rapid piecewise-constant commands with 20-step holds
+                      (0.2 s), shorter than the 30-step motor settling time.
+                      The motor is always in transient: v and ω are never
+                      steady, so the kinematic ideal and physics trajectory
+                      diverge most strongly here.
         """
         if dt is None:
             dt = self.robot.dt
@@ -164,7 +187,64 @@ class DataGenerator:
         elif trajectory_type == 'random':
             v_cmds, omega_cmds = self._generate_multistep_sequence(n_samples)
 
+        # ── Lazy-phase trajectories ──────────────────────────────────────────
+
+        elif trajectory_type == 'slalom':
+            # Constant forward speed with rapid square-wave steering.
+            # Period = 50 steps (0.5 s) — motor settling ≈ 30 steps.
+            # The actual ω never fully reaches the commanded value before
+            # reversing, producing a smooth weaving path vs the ideal sharp wave.
+            period = 50
+            v_cmds    = np.full(n_samples, 0.6)
+            raw       = np.sign(np.sin(2 * np.pi * np.arange(n_samples) / period))
+            raw[raw == 0] = 1.0          # avoid zero at zero-crossings
+            omega_cmds = 1.5 * raw
+
+        elif trajectory_type == 'zigzag':
+            # Short forward segments separated by rapid hard turns.
+            # Turn segment = 20 steps (0.2 s) < τ × 3 = 30 steps.
+            # "Lazy corner": the robot cuts every corner because the motor
+            # cannot spin up fast enough before the turn ends.
+            seg_straight = 70   # 0.7 s
+            seg_turn     = 20   # 0.2 s
+            v_cmds    = np.zeros(n_samples)
+            omega_cmds = np.zeros(n_samples)
+            k, turn_dir = 0, 1
+            while k < n_samples:
+                end = min(k + seg_straight, n_samples)
+                v_cmds[k:end]     = 0.8
+                omega_cmds[k:end] = 0.0
+                k = end
+                if k >= n_samples:
+                    break
+                end = min(k + seg_turn, n_samples)
+                v_cmds[k:end]     = 0.3
+                omega_cmds[k:end] = turn_dir * 2.0   # aggressive — exceeds max wheel speed via ω·L
+                turn_dir          = -turn_dir
+                k = end
+
+        elif trajectory_type == 'step_burst':
+            # Rapid piecewise-constant commands, hold = 20 steps (0.2 s).
+            # Motor never settles → vehicle is always in transient.
+            # Maximises the visible gap between kinematic ideal and ground truth.
+            hold      = 20
+            v_pat     = np.array([ 0.9, 0.0, -0.8,  0.7, -0.9,  0.5,  0.8, -0.4,
+                                    0.0,  0.8, -0.6,  0.7,  0.0, -0.9,  0.8, -0.5,
+                                    0.9,  0.3, -0.7,  0.6])
+            omega_pat = np.array([ 0.0,  1.5, -1.5,  0.8,  0.0, -1.5,  1.2,  0.5,
+                                   -1.5,  1.0,  1.5, -0.8,  1.5,  0.5, -1.5,  0.8,
+                                   -1.0,  1.5,  0.0, -1.2])
+            n_steps   = len(v_pat)
+            v_cmds    = np.zeros(n_samples)
+            omega_cmds = np.zeros(n_samples)
+            for i in range((n_samples + hold - 1) // hold):
+                s, e = i * hold, min((i + 1) * hold, n_samples)
+                v_cmds[s:e]     = v_pat[i % n_steps]
+                omega_cmds[s:e] = omega_pat[i % n_steps]
+
         else:
-            raise ValueError(f"Unknown trajectory_type: {trajectory_type}")
+            raise ValueError(f"Unknown trajectory_type: {trajectory_type!r}. "
+                             f"Valid: figure8, square, spiral, straight, random, "
+                             f"slalom, zigzag, step_burst")
 
         return v_cmds, omega_cmds

@@ -185,7 +185,7 @@ def main():
 
     tgen = TrajectoryGenerator(arx, dt=cfg['dt'])
 
-    for traj_name in ['figure8', 'square', 'spiral']:
+    for traj_name in ['figure8', 'square', 'spiral', 'slalom', 'zigzag', 'step_burst']:
         print(f"   Trajectory: {traj_name}")
         v_cmds, omega_cmds = gen.generate_trajectory_commands(
             trajectory_type=traj_name, n_samples=5000   # 50 seconds at dt=0.01

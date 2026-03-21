@@ -213,7 +213,11 @@ fetch('/api/simulation')
     data = d;
     document.getElementById('overlay').style.display = 'none';
     const sel = document.getElementById('trajSelect');
-    const labels = { figure8: 'Figure-8', square: 'Square', spiral: 'Spiral', fan: 'Fan (multi)' };
+    const labels = {
+      figure8: 'Figure-8', square: 'Square', spiral: 'Spiral',
+      slalom: 'Slalom ⚡', zigzag: 'Zigzag ⚡', step_burst: 'Step Burst ⚡',
+      fan: 'Fan (multi)',
+    };
     Object.keys(data).forEach(k => {
       const o = document.createElement('option');
       o.value = k; o.textContent = labels[k] || k; sel.appendChild(o);
@@ -543,10 +547,15 @@ def run_simulation() -> dict:
     result = {}
     stride = 2
 
-    for name in ['figure8', 'square', 'spiral']:
+    # slalom/zigzag/step_burst use shorter sequences — 1500 steps = 15 s is plenty
+    traj_lengths = {
+        'figure8': 2000, 'square': 2000, 'spiral': 2000,
+        'slalom': 1500, 'zigzag': 1500, 'step_burst': 1000,
+    }
+    for name in ['figure8', 'square', 'spiral', 'slalom', 'zigzag', 'step_burst']:
         print(f"        {name} …", flush=True)
         v_cmds, omega_cmds = gen.generate_trajectory_commands(
-            trajectory_type=name, n_samples=2000
+            trajectory_type=name, n_samples=traj_lengths[name]
         )
         # Ground truth (reset robot each time inside simulate)
         robot.reset()
