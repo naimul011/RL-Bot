@@ -53,9 +53,17 @@ pip install -r requirements.txt
 # Run the full offline pipeline (saves figures to ./results/)
 python main.py
 
+# To run with PyBullet backend, set in main.py CONFIG:
+#   'simulator_backend': 'pybullet'
+#   'pybullet_gui': False   # True for GUI rendering
+
 # OR launch the interactive browser visualizer
 python web_visualizer.py
 # Open http://localhost:5000
+
+# To run the visualizer with PyBullet, set in web_visualizer.py _CFG:
+#   'simulator_backend': 'pybullet'
+#   'pybullet_gui': False   # True for GUI rendering
 ```
 
 ---
@@ -144,6 +152,7 @@ Sample output figures saved to `./results/`:
 - `matplotlib` — offline figure generation
 - `statsmodels` — statistical utilities
 - `flask` — web visualizer server
+- `pybullet` — rigid-body simulation backend (optional alternative to analytic simulator)
 
 ---
 

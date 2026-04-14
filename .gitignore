@@ -21,3 +21,10 @@ results/
 # OS
 .DS_Store
 Thumbs.db
+
+# Extra weights extensions
+*.h5
+*.pt
+*.pth
+*.onnx
+*.zip

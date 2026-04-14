@@ -441,6 +441,8 @@ _CFG = {
     'max_wheel_speed': 1.5,
     'motor_time_constant': 0.1,
     'dt': 0.01,
+  'simulator_backend': 'analytic',  # 'analytic' or 'pybullet'
+  'pybullet_gui': False,
     'n_samples': 8000,
     'train_split': 0.8,
     'v_range': (-1.0, 1.0),
@@ -482,13 +484,25 @@ def run_simulation() -> dict:
     print("=" * 55)
     print("  [1/4] Creating robot and generating training data…", flush=True)
 
-    robot = DifferentialDriveRobot(
-        wheel_radius=_CFG['wheel_radius'],
-        wheel_base=_CFG['wheel_base'],
-        max_wheel_speed=_CFG['max_wheel_speed'],
-        motor_time_constant=_CFG['motor_time_constant'],
-        dt=_CFG['dt'],
-    )
+    if _CFG['simulator_backend'] == 'pybullet':
+        from pybullet_simulator import PyBulletDifferentialDriveRobot
+        robot = PyBulletDifferentialDriveRobot(
+            wheel_radius=_CFG['wheel_radius'],
+            wheel_base=_CFG['wheel_base'],
+            max_wheel_speed=_CFG['max_wheel_speed'],
+            motor_time_constant=_CFG['motor_time_constant'],
+            dt=_CFG['dt'],
+            use_gui=_CFG['pybullet_gui'],
+        )
+    else:
+        robot = DifferentialDriveRobot(
+            wheel_radius=_CFG['wheel_radius'],
+            wheel_base=_CFG['wheel_base'],
+            max_wheel_speed=_CFG['max_wheel_speed'],
+            motor_time_constant=_CFG['motor_time_constant'],
+            dt=_CFG['dt'],
+        )
+
     gen = DataGenerator(robot, rng_seed=_CFG['rng_seed'])
     dataset = gen.generate_dataset(
         n_samples=_CFG['n_samples'],

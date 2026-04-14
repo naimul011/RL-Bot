@@ -57,6 +57,10 @@ CONFIG = {
     'run_order_study':    True,
     'order_study_range':  list(range(1, 16)),
 
+    # Simulator backend
+    'simulator_backend':   'pybullet',  # 'analytic' or 'pybullet'
+    'pybullet_gui':        True,
+
     # Output
     'output_dir': './results',
 }
@@ -75,14 +79,25 @@ def main():
     print("=" * 65)
 
     # ── Step 1: Create robot ──────────────────────────────────────────────────
-    robot = DifferentialDriveRobot(
-        wheel_radius=cfg['wheel_radius'],
-        wheel_base=cfg['wheel_base'],
-        max_wheel_speed=cfg['max_wheel_speed'],
-        motor_time_constant=cfg['motor_time_constant'],
-        dt=cfg['dt'],
-    )
-    print(f"\n[1] Robot: Pioneer P3-DX | dt={cfg['dt']}s | "
+    if cfg['simulator_backend'] == 'pybullet':
+        from pybullet_simulator import PyBulletDifferentialDriveRobot
+        robot = PyBulletDifferentialDriveRobot(
+            wheel_radius=cfg['wheel_radius'],
+            wheel_base=cfg['wheel_base'],
+            max_wheel_speed=cfg['max_wheel_speed'],
+            motor_time_constant=cfg['motor_time_constant'],
+            dt=cfg['dt'],
+            use_gui=cfg['pybullet_gui'],
+        )
+    else:
+        robot = DifferentialDriveRobot(
+            wheel_radius=cfg['wheel_radius'],
+            wheel_base=cfg['wheel_base'],
+            max_wheel_speed=cfg['max_wheel_speed'],
+            motor_time_constant=cfg['motor_time_constant'],
+            dt=cfg['dt'],
+        )
+    print(f"\n[1] Robot: Pioneer P3-DX ({cfg['simulator_backend']}) | dt={cfg['dt']}s | "
           f"motor τ={cfg['motor_time_constant']}s | pole={robot._pole:.3f}")
 
     # ── Step 2: Generate training/validation data ─────────────────────────────

@@ -1,0 +1,176 @@
+<?xml version="1.0"?>
+<!--
+  Pioneer P3-DX style robot with front and rear ball casters for 3D terrain stability.
+
+  Geometry reference:
+    base_link center placed at z = 0.1175 m above ground
+    Drive wheel center: base_z + (-0.020) = 0.0975 m  → bottom at z = 0.0  ✓
+    Caster sphere center: base_z + (-0.0975) = 0.020 m → bottom at z = 0.0  ✓
+
+  Joint indices (used by PyBullet VELOCITY_CONTROL):
+    0 → left_wheel_joint   (driven)
+    1 → right_wheel_joint  (driven)
+    2 → front_caster_joint (fixed, low friction sphere)
+    3 → rear_caster_joint  (fixed, low friction sphere)
+-->
+<robot name="pioneer_p3dx_3d">
+
+  <!-- ─── Materials ────────────────────────────────────────────────────── -->
+  <material name="chassis_blue">
+    <color rgba="0.10 0.40 0.80 1.0"/>
+  </material>
+  <material name="wheel_dark">
+    <color rgba="0.15 0.15 0.15 1.0"/>
+  </material>
+  <material name="caster_gray">
+    <color rgba="0.65 0.65 0.65 1.0"/>
+  </material>
+
+  <!-- ─── Base chassis ─────────────────────────────────────────────────── -->
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <box size="0.445 0.380 0.120"/>
+      </geometry>
+      <material name="chassis_blue"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.445 0.380 0.120"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="9.0"/>
+      <!-- Box: Ixx = m(h²+d²)/12, Iyy = m(w²+d²)/12, Izz = m(w²+h²)/12 -->
+      <!-- w=0.445, h=0.380, d=0.120 -->
+      <inertia ixx="0.1044" ixy="0.0" ixz="0.0"
+               iyy="0.0806" iyz="0.0"
+               izz="0.1783"/>
+    </inertial>
+  </link>
+
+  <!-- ─── Left drive wheel ─────────────────────────────────────────────── -->
+  <link name="left_wheel">
+    <visual>
+      <geometry>
+        <cylinder radius="0.0975" length="0.040"/>
+      </geometry>
+      <material name="wheel_dark"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.0975" length="0.040"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="1.0"/>
+      <!-- Solid cylinder: Ixx=Iyy=m(3r²+h²)/12, Izz=mr²/2 -->
+      <inertia ixx="0.002437" ixy="0.0" ixz="0.0"
+               iyy="0.002437" iyz="0.0"
+               izz="0.004751"/>
+    </inertial>
+  </link>
+
+  <!-- ─── Right drive wheel ────────────────────────────────────────────── -->
+  <link name="right_wheel">
+    <visual>
+      <geometry>
+        <cylinder radius="0.0975" length="0.040"/>
+      </geometry>
+      <material name="wheel_dark"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.0975" length="0.040"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="1.0"/>
+      <inertia ixx="0.002437" ixy="0.0" ixz="0.0"
+               iyy="0.002437" iyz="0.0"
+               izz="0.004751"/>
+    </inertial>
+  </link>
+
+  <!-- ─── Front caster ball ────────────────────────────────────────────── -->
+  <link name="front_caster">
+    <visual>
+      <geometry>
+        <sphere radius="0.020"/>
+      </geometry>
+      <material name="caster_gray"/>
+    </visual>
+    <collision>
+      <geometry>
+        <sphere radius="0.020"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <!-- Solid sphere: I = 2mr²/5 -->
+      <inertia ixx="1.6e-05" ixy="0.0" ixz="0.0"
+               iyy="1.6e-05" iyz="0.0"
+               izz="1.6e-05"/>
+    </inertial>
+  </link>
+
+  <!-- ─── Rear caster ball ─────────────────────────────────────────────── -->
+  <link name="rear_caster">
+    <visual>
+      <geometry>
+        <sphere radius="0.020"/>
+      </geometry>
+      <material name="caster_gray"/>
+    </visual>
+    <collision>
+      <geometry>
+        <sphere radius="0.020"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <inertia ixx="1.6e-05" ixy="0.0" ixz="0.0"
+               iyy="1.6e-05" iyz="0.0"
+               izz="1.6e-05"/>
+    </inertial>
+  </link>
+
+  <!-- ─── Joints ───────────────────────────────────────────────────────── -->
+
+  <!--
+    Drive wheels rotate around the robot's lateral (Y-world) axis.
+    The cylinder's local axis is Z, so we tilt it -90° about X to align Z_local → Y_world.
+    origin: x=0, y=±0.1905 (half of 0.381 m track), z=-0.020 (below chassis centre)
+  -->
+  <joint name="left_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="left_wheel"/>
+    <origin xyz="0.0 0.1905 -0.020" rpy="-1.5707963 0.0 0.0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <joint name="right_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="right_wheel"/>
+    <origin xyz="0.0 -0.1905 -0.020" rpy="-1.5707963 0.0 0.0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <!--
+    Casters: fixed joints (spheres slide freely on terrain with near-zero friction).
+    z_relative = 0.020 (caster_center_world) - 0.1175 (base_center_world) = -0.0975
+    Front at x=+0.155, rear at x=-0.155 (near edge of chassis)
+  -->
+  <joint name="front_caster_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="front_caster"/>
+    <origin xyz="0.155 0.0 -0.0975"/>
+  </joint>
+
+  <joint name="rear_caster_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="rear_caster"/>
+    <origin xyz="-0.155 0.0 -0.0975"/>
+  </joint>
+
+</robot>
